@@ -1,39 +1,66 @@
-import re, random
+import re
 from html.parser import HTMLParser
+import random
+import base64
+import clipboard
 
-def random_name(length=10):
-    chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
-    return '_' + ''.join(random.choices(chars, k=length))
+class NameGenerator:
+    def __init__(self):
+        self.index = 0
 
-def encode_string(s: str) -> str:
-    codes = ",".join(str(ord(c)) for c in s)
-    return f"String.fromCharCode({codes})"
+    def _to_name(self, n):
+        name = ''
+        while True:
+            name = chr(97 + n % 26) + name
+            n = n // 26 - 1
+            if n < 0:
+                break
+        return name
+
+    def next(self):
+        name = self._to_name(self.index)
+        self.index += 1
+        return name
+
+def encode_string_dynamic(s: str) -> str:
+    parts = []
+    for c in s:
+        base = ord(c) + random.randint(-5, 5)
+        diff = ord(c) - base
+        op = '+' if diff >= 0 else '-'
+        diff = abs(diff)
+        parts.append(f"String.fromCharCode('\\u{base:04x}'.charCodeAt(0) {op} {diff})")
+    return ' + '.join(parts)
 
 def junk_code() -> str:
-    fname = random_name()
-    val = random.randint(1000, 9999)
-    return f"function {fname}() {{ var x = {val}; return x * x; }}"
+    val = random.randint(100, 999)
+    return f"if('' === String.fromCharCode({val})) return;"
 
 class HTMLToJSParser(HTMLParser):
-    def __init__(self, parent_var):
+    def __init__(self, parent_var, name_gen: NameGenerator):
         super().__init__()
         self.js_lines = []
         self.stack = [parent_var]
         self.ns_stack = [None]
+        self.name_gen = name_gen
 
     def handle_starttag(self, tag, attrs):
-        el_var = random_name()
+        el_var = self.name_gen.next()
         ns = "http://www.w3.org/2000/svg" if (self.ns_stack[-1] or tag == "svg") else None
         self.ns_stack.append(ns)
 
+        tag_encoded = encode_string_dynamic(tag)
         if ns:
-            self.js_lines.append(f"var {el_var} = document.createElementNS('{ns}', '{tag}');")
+            ns_encoded = encode_string_dynamic(ns)
+            self.js_lines.append(f"var {el_var} = document.createElementNS({ns_encoded}, {tag_encoded});")
         else:
-            self.js_lines.append(f"var {el_var} = document.createElement('{tag}');")
+            self.js_lines.append(f"var {el_var} = document.createElement({tag_encoded});")
 
         for (attr, val) in attrs:
             val = val or ""
-            self.js_lines.append(f"{el_var}.setAttribute('{attr}', {encode_string(val)});")
+            encoded_attr = encode_string_dynamic(attr)
+            encoded_val = encode_string_dynamic(val)
+            self.js_lines.append(f"{el_var}.setAttribute({encoded_attr}, {encoded_val});")
 
         self.js_lines.append(f"{self.stack[-1]}.appendChild({el_var});")
         self.stack.append(el_var)
@@ -45,17 +72,11 @@ class HTMLToJSParser(HTMLParser):
     def handle_data(self, data):
         text = data.strip()
         if text:
-            el_var = random_name()
-            encoded = encode_string(text)
-
-            if random.random() < 0.5:
-                self.js_lines.append(junk_code())
-
+            el_var = self.name_gen.next()
+            encoded = encode_string_dynamic(text)
+            self.js_lines.append(junk_code())
             self.js_lines.append(f"var {el_var} = document.createTextNode({encoded});")
             self.js_lines.append(f"{self.stack[-1]}.appendChild({el_var});")
-
-            if random.random() < 0.5:
-                self.js_lines.append(f"return {el_var};")
 
 def obfuscate_html_body_to_js(html: str) -> str:
     body_match = re.search(r"<body[^>]*>(.*?)</body>", html, re.DOTALL | re.IGNORECASE)
@@ -63,16 +84,20 @@ def obfuscate_html_body_to_js(html: str) -> str:
         raise ValueError("No <body> found")
 
     body_content = body_match.group(1)
-    main_var = random_name()
+    name_gen = NameGenerator()
+    main_var = name_gen.next()
 
-    parser = HTMLToJSParser(main_var)
+    parser = HTMLToJSParser(main_var, name_gen)
     parser.feed(body_content)
 
     js_lines = [f"(function() {{", f"  var {main_var} = document.body;"]
     js_lines.extend("  " + l for l in parser.js_lines)
     js_lines.append("})();")
 
-    script = "<script>\n" + "\n".join(js_lines) + "\n</script>"
+    final_code = "\n".join(js_lines)
+    final_code_encoded = base64.b64encode(final_code.encode('utf-8')).decode('ascii')
+
+    script = f"<script>eval(atob('{final_code_encoded}'))</script>"
 
     def repl(match):
         return match.group(1) + "\n" + script + "\n" + match.group(2)
@@ -82,20 +107,15 @@ def obfuscate_html_body_to_js(html: str) -> str:
 
 if __name__ == "__main__":
     example_html = """
-    <body>
-        <h1>안녕하세요</h1>
-        <p>테스트입니다</p>
-        <li>여기다가 난독화 할 코드 넣으시면 됍니다</li>
-    </body>
+    # 코드 여기에
     """
 
     result = obfuscate_html_body_to_js(example_html)
 
-    print(result)
+    with open("obfuscated_result.html", "w", encoding="utf-8") as f:
+        f.write(result)
 
-    try:
-        input("\n=== 난독화 완료 === Press Enter to exit...")
-    except EOFError:
-        import time
-        print("\n[자동 대기 중 - 콘솔 창 닫히지 않도록]")
-        time.sleep(30)
+    print(result)
+    clipboard.copy(result)
+    print("클립보드에 복사 완료! 이제 Ctrl+V ㄱ")
+    input("\n=== 난독화 + base64 + eval 완료 === Press Enter to exit...")
